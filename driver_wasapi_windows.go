@@ -396,6 +396,12 @@ func (c *wasapiContext) startOnCOMThread() (ferr error) {
 
 	// TODO: Should some errors be allowed? See WASAPIManager.cpp in the official example SimpleWASAPIPlaySound.
 
+	// A client created while suspended stays stopped, so it does not hold
+	// the stream while nothing feeds it. Resume starts it.
+	if c.isSuspended() {
+		return nil
+	}
+
 	if err := c.client.Start(); err != nil {
 		return err
 	}
@@ -545,15 +551,14 @@ func (c *wasapiContext) Resume() error {
 	if errors.Is(startErr, _AUDCLNT_E_NOT_STOPPED) {
 		startErr = nil
 	}
-	if startErr != nil {
-		return startErr
-	}
+	// Unpark the loop even when starting failed: its write error drives
+	// the recovery that recreates the client.
 	c.suspendedCond.L.Lock()
 	c.suspended = false
 	c.suspendedCond.L.Unlock()
 	c.suspendedCond.Signal()
 
-	return nil
+	return startErr
 }
 
 func (c *wasapiContext) isSuspended() bool {
