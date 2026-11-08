@@ -438,6 +438,12 @@ func (c *wasapiContext) loopOnRenderThread() error {
 			return fmt.Errorf("oto: WaitForSingleObject failed: returned value: %d", evt)
 		}
 
+		// The event can be left over from before the client stopped; a
+		// suspend may have landed while waiting for it.
+		if c.isSuspended() {
+			continue
+		}
+
 		if err := c.writeOnRenderThread(); err != nil {
 			return err
 		}
@@ -501,15 +507,47 @@ func (c *wasapiContext) writeOnRenderThread() error {
 }
 
 func (c *wasapiContext) Suspend() error {
+	// Hold the lock a buffer write holds, so the render thread cannot be
+	// mid-write when the client stops below, and park the loop before
+	// stopping the client. A running client with nothing to feed keeps the
+	// audio device in use, which keeps the computer from sleeping.
+	c.m.Lock()
 	c.suspendedCond.L.Lock()
 	c.suspended = true
 	c.suspendedCond.L.Unlock()
+	c.m.Unlock()
 	c.suspendedCond.Signal()
 
-	return nil
+	var stopErr error
+	c.comThread.Run(func() {
+		if c.client == nil {
+			return
+		}
+		_, stopErr = c.client.Stop()
+	})
+	// Stopping an already stopped stream is a success.
+	if errors.Is(stopErr, _AUDCLNT_E_NOT_STOPPED) {
+		stopErr = nil
+	}
+	return stopErr
 }
 
 func (c *wasapiContext) Resume() error {
+	// Start the client before the loop feeds buffers again.
+	var startErr error
+	c.comThread.Run(func() {
+		if c.client == nil {
+			return
+		}
+		startErr = c.client.Start()
+	})
+	// Starting an already started stream is a success.
+	if errors.Is(startErr, _AUDCLNT_E_NOT_STOPPED) {
+		startErr = nil
+	}
+	if startErr != nil {
+		return startErr
+	}
 	c.suspendedCond.L.Lock()
 	c.suspended = false
 	c.suspendedCond.L.Unlock()
